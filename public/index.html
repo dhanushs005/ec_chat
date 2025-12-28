@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Secure Chat</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+
+<body class="bg-[#efeae2] h-screen flex justify-center">
+
+<!-- AUTH -->
+<div id="auth" class="w-full max-w-md bg-white h-full p-6 flex flex-col justify-center">
+  <h1 class="text-2xl font-bold text-center mb-2">🔐 Secure Chat</h1>
+  <p class="text-center text-gray-500 mb-4">Encrypted Group Rooms</p>
+
+  <input id="username" class="input" placeholder="Your name">
+  <input id="roomId" class="input mt-2" placeholder="Room ID">
+  <input id="password" class="input mt-2" type="password" placeholder="Room password">
+
+  <div class="grid grid-cols-2 gap-3 mt-4">
+    <button onclick="createRoom()" class="btn-primary">Create</button>
+    <button onclick="joinRoom()" class="btn-secondary">Join</button>
+  </div>
+
+  <p id="status" class="text-red-500 text-sm mt-3 text-center"></p>
+</div>
+
+<!-- CHAT -->
+<div id="chatBox" class="hidden w-full max-w-md bg-[#efeae2] h-full flex flex-col">
+
+  <!-- HEADER -->
+  <div class="bg-[#075e54] text-white px-4 py-3 flex justify-between items-center">
+    <span class="font-semibold">Encrypted Chat</span>
+    <button id="deleteBtn" onclick="deleteChat()" class="hidden text-sm bg-red-600 px-3 py-1 rounded">
+      Delete Chat
+    </button>
+  </div>
+
+  <!-- MESSAGES -->
+  <ul id="chat" class="flex-1 overflow-y-auto p-3 space-y-2"></ul>
+
+  <!-- INPUT -->
+  <div class="bg-white p-2 flex gap-2">
+    <input id="msg" class="flex-1 border rounded-full px-4 py-2"
+      placeholder="Type a message">
+    <button onclick="sendMessage()" class="bg-[#075e54] text-white px-4 rounded-full">
+      Send
+    </button>
+  </div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+
+<script>
+const socket = io();
+
+let roomId = "";
+let password = "";
+let username = "";
+let isAdmin = false;
+
+/* ---------- HELPERS ---------- */
+function randomId() {
+  return Math.random().toString(36).substring(2, 8);
+}
+
+/* ---------- CRYPTO ---------- */
+async function deriveKey() {
+  const enc = new TextEncoder();
+  const base = await crypto.subtle.importKey(
+    "raw", enc.encode(password), "PBKDF2", false, ["deriveKey"]
+  );
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt: enc.encode("chat"), iterations: 100000, hash: "SHA-256" },
+    base, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]
+  );
+}
+
+async function encrypt(text) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveKey();
+  const buf = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv }, key, new TextEncoder().encode(text)
+  );
+  return { iv: [...iv], data: [...new Uint8Array(buf)] };
+}
+
+async function decrypt(payload) {
+  const key = await deriveKey();
+  const buf = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: new Uint8Array(payload.iv) },
+    key, new Uint8Array(payload.data)
+  );
+  return new TextDecoder().decode(buf);
+}
+
+/* ---------- ROOM ---------- */
+function createRoom() {
+  username = usernameInput();
+  if (!username) return;
+
+  roomId = randomId();
+  password = randomId();
+  socket.emit("create-room", { roomId, password });
+
+  alert(`Room ID: ${roomId}\nPassword: ${password}`);
+}
+
+function joinRoom() {
+  username = usernameInput();
+  roomId = roomIdInput();
+  password = passwordInput();
+  if (!username || !roomId || !password) return;
+
+  socket.emit("join-room", { roomId, password });
+}
+
+function usernameInput() {
+  const v = document.getElementById("username").value.trim();
+  if (!v) status.innerText = "Username required";
+  return v;
+}
+function roomIdInput() {
+  return document.getElementById("roomId").value.trim();
+}
+function passwordInput() {
+  return document.getElementById("password").value.trim();
+}
+
+/* ---------- SOCKET EVENTS ---------- */
+socket.on("joined-room", ({ isAdmin: admin }) => {
+  isAdmin = admin;
+  auth.classList.add("hidden");
+  chatBox.classList.remove("hidden");
+  if (isAdmin) deleteBtn.classList.remove("hidden");
+});
+
+socket.on("chat-history", async msgs => {
+  for (const m of msgs) {
+    const text = await decrypt(m.data);
+    addMessage(m.from, text, m.from === username);
+  }
+});
+
+socket.on("message", async ({ from, data }) => {
+  const text = await decrypt(data);
+  addMessage(from, text, false);
+});
+
+socket.on("chat-deleted", () => {
+  chat.innerHTML = "";
+  alert("Chat deleted by admin");
+});
+
+socket.on("error-msg", msg => {
+  status.innerText = msg;
+});
+
+/* ---------- CHAT ---------- */
+async function sendMessage() {
+  const input = document.getElementById("msg");
+  const text = input.value.trim();
+  if (!text) return;
+
+  const encrypted = await encrypt(text);
+  socket.emit("message", { roomId, from: username, data: encrypted });
+
+  addMessage(username, text, true);
+  input.value = "";
+}
+
+function deleteChat() {
+  if (confirm("Delete entire chat for everyone?")) {
+    socket.emit("delete-chat", { roomId });
+  }
+}
+
+/* ---------- UI ---------- */
+function addMessage(from, text, mine) {
+  const li = document.createElement("li");
+  li.className = `max-w-[75%] px-3 py-2 rounded-lg text-sm ${
+    mine ? "ml-auto bg-[#dcf8c6]" : "bg-white"
+  }`;
+  li.innerHTML = `<b>${from}</b><br>${text}`;
+  chat.appendChild(li);
+  chat.scrollTop = chat.scrollHeight;
+}
+</script>
+
+<style>
+.input { @apply w-full border rounded px-3 py-2; }
+.btn-primary { @apply bg-indigo-600 text-white rounded py-2; }
+.btn-secondary { @apply bg-green-600 text-white rounded py-2; }
+</style>
+
+</body>
+</html>
